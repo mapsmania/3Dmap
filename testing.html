@@ -1,195 +1,227 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-  <meta charset="UTF-8">
-  <title>Head-Tracked 3D Map + Hand Gestures</title>
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta charset="UTF-8">
+    <title>Head-Tracked 3D Map (MapLibre + OpenFreeMap)</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    
+    <link href="https://unpkg.com/maplibre-gl@3.6.1/dist/maplibre-gl.css" rel="stylesheet" />
+    <script src="https://unpkg.com/maplibre-gl@3.6.1/dist/maplibre-gl.js"></script>
 
-  <!-- MapLibre -->
-  <link href="https://unpkg.com/maplibre-gl@3.6.1/dist/maplibre-gl.css" rel="stylesheet" />
-  <script src="https://unpkg.com/maplibre-gl@3.6.1/dist/maplibre-gl.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/face_mesh"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils"></script>
 
-  <!-- MediaPipe -->
-  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/face_mesh"></script>
-  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands"></script>
-  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils"></script>
-
-  <style>
-    html, body { margin: 0; height: 100%; overflow: hidden; }
-    #map { width: 100%; height: 100%; }
-    video {
-      position: fixed;
-      top: 0;
-      left: 0;
-      width: 120px;
-      height: 90px;
-      opacity: 0.3;
-      border-radius: 8px;
-      z-index: 10;
-    }
-    #modeBtn {
-      position: fixed;
-      top: 20px;
-      right: 20px;
-      z-index: 20;
-      padding: 10px 16px;
-      border: none;
-      border-radius: 8px;
-      background: rgba(0,0,0,0.6);
-      color: #fff;
-      font-size: 14px;
-      cursor: pointer;
-    }
-    #overlay {
-      position: fixed;
-      top: 60px;
-      right: 20px;
-      z-index: 20;
-      background: rgba(0,0,0,0.6);
-      color: white;
-      padding: 10px 14px;
-      border-radius: 8px;
-      width: 200px;
-      display: none;
-      font-size: 13px;
-      line-height: 1.4;
-    }
-  </style>
+    <style>
+        html, body { margin: 0; height: 100%; overflow: hidden; }
+        #map { width: 100%; height: 100%; }
+        video { 
+            position: fixed; 
+            top: 0; 
+            left: 0; 
+            width: 120px; 
+            height: 90px; 
+            opacity: 1; 
+            border-radius: 8px; 
+            z-index: 10;
+        }
+        /* Style the custom marker element */
+        .gaze-marker {
+            background-color: #ff0000;
+            width: 15px;
+            height: 15px;
+            border: 3px solid #ffffff;
+            border-radius: 50%;
+            cursor: pointer;
+        }
+    </style>
 </head>
 <body>
 
 <video id="video" autoplay muted playsinline></video>
 <div id="map"></div>
-<button id="modeBtn">Switch to Gestures</button>
-<div id="overlay">
-  <strong>Gesture Mode Active</strong><br>
-  🖐️ Move hands apart/together to zoom<br>
-  ↔️ Move one hand left/right to rotate<br>
-  🙌 Keep both hands visible for best results
-</div>
 
 <script>
-  // === 1. Map Setup ===
-  const map = new maplibregl.Map({
-    container: 'map',
-    style: 'https://tiles.openfreemap.org/styles/liberty',
-    center: [-0.1276, 51.5072],
-    zoom: 16,
-    pitch: 60,
-    bearing: 0,
-    antialias: true
-  });
+    // Gaze Interactivity Constants
+    const STARE_DURATION = 1000; // Time in ms to hold gaze
+    const GAZE_TOLERANCE_PX = 50; // Max distance in pixels from marker to count as a stare
+    const MARKER_COORDS = [-0.125, 51.505]; // New Marker location near map center
 
-  // === 2. Webcam ===
-  const video = document.getElementById('video');
-  navigator.mediaDevices.getUserMedia({ video: true })
-    .then(stream => { video.srcObject = stream; video.play(); })
-    .catch(() => alert("Webcam access denied or unavailable."));
+    // Gaze State Variables
+    let gazeHoldTime = 0;
+    let isStareActive = false;
+    let lastTime = performance.now();
 
-  // === 3. FaceMesh ===
-  const faceMesh = new FaceMesh({ locateFile: f => 
-    `https://cdn.jsdelivr.net/npm/@mediapipe/face_mesh/${f}`
-  });
-  faceMesh.setOptions({
-    maxNumFaces: 1,
-    refineLandmarks: true,
-    minDetectionConfidence: 0.5,
-    minTrackingConfidence: 0.5
-  });
+    // === 1. Initialize the Map ===
+    const map = new maplibregl.Map({
+        container: 'map',
+        style: 'https://tiles.openfreemap.org/styles/liberty',
+        center: [-0.1276, 51.5072], // London
+        zoom: 16,
+        pitch: 60,
+        bearing: 0,
+        antialias: true
+    });
 
-  // === 4. Hands ===
-  const hands = new Hands({ locateFile: f => 
-    `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${f}`
-  });
-  hands.setOptions({
-    maxNumHands: 2,
-    modelComplexity: 1,
-    minDetectionConfidence: 0.6,
-    minTrackingConfidence: 0.6
-  });
+    map.on('load', () => {
+        console.log("Map loaded");
 
-  // === 5. Camera ===
-  const camera = new Camera(video, {
-    onFrame: async () => {
-      if (mode === '3d') await faceMesh.send({ image: video });
-      else if (mode === 'gestures') await hands.send({ image: video });
-    },
-    width: 640,
-    height: 480
-  });
-  camera.start();
+        // Add the Marker to the map
+        const el = document.createElement('div');
+        el.className = 'gaze-marker';
+        
+        const popup = new maplibregl.Popup({ offset: 25 })
+            .setHTML('<h3>You were staring at me!</h3><p>Gaze-based interaction successful.</p>');
+            
+        new maplibregl.Marker(el)
+            .setLngLat(MARKER_COORDS)
+            .setPopup(popup)
+            .addTo(map);
+            
+        // Expose the marker element for screen position calculation
+        window.gazeMarkerElement = el; 
+        window.gazeMarkerPopup = popup;
+    });
 
-  // === 6. Mode Toggle ===
-  let mode = '3d';
-  const btn = document.getElementById('modeBtn');
-  const overlay = document.getElementById('overlay');
-  btn.onclick = () => {
-    mode = mode === '3d' ? 'gestures' : '3d';
-    if (mode === 'gestures') {
-      btn.textContent = "Switch to 3D Mode";
-      overlay.style.display = "block";
-    } else {
-      btn.textContent = "Switch to Gestures";
-      overlay.style.display = "none";
+    // === 2. Webcam Setup ===
+    const video = document.getElementById('video');
+    navigator.mediaDevices.getUserMedia({ video: true })
+        .then(stream => {
+            video.srcObject = stream;
+            video.play();
+        })
+        .catch(err => alert("Webcam access denied or unavailable."));
+
+    // === 3. FaceMesh Setup ===
+    const faceMesh = new FaceMesh({ locateFile: (file) => 
+        `https://cdn.jsdelivr.net/npm/@mediapipe/face_mesh/${file}`
+    });
+    
+    faceMesh.setOptions({
+        maxNumFaces: 1,
+        refineLandmarks: true,
+        minDetectionConfidence: 0.5,
+        minTrackingConfidence: 0.5
+    });
+
+    const camera = new Camera(video, {
+        onFrame: async () => { await faceMesh.send({ image: video }); },
+        width: 640,
+        height: 480
+    });
+    camera.start();
+
+    // === 4. Tracking and Gaze Logic ===
+    let targetBearing = 0;
+    let targetPitch = 60;
+    
+    // Landmark indices for eyes (using MediaPipe's extended set for refined landmarks)
+    // Left eye (viewer's right) landmarks: Center(33), Outer(133), Inner(163)
+    const LEFT_EYE_CENTRE = 33;
+    const LEFT_EYE_OUTER = 133;
+    
+    // Right eye (viewer's left) landmarks: Center(362), Outer(263), Inner(384)
+    const RIGHT_EYE_CENTRE = 362;
+    const RIGHT_EYE_OUTER = 263;
+
+    faceMesh.onResults(results => {
+        if (!results.multiFaceLandmarks?.length) {
+            gazeHoldTime = 0; // Reset gaze timer if face is lost
+            return;
+        }
+
+        const landmarks = results.multiFaceLandmarks[0];
+        const nose = landmarks[1]; // nose tip landmark
+        
+        // A. HEAD TRACKING (as before)
+        const dx = (nose.x - 0.5);
+        const dy = (nose.y - 0.5);
+        targetBearing = dx * 50;
+        targetPitch = 60 - dy * 40;
+
+        // B. GAZE TRACKING
+        if (window.gazeMarkerElement) {
+            // Get eye coordinates (normalized to video/screen 0 to 1)
+            const leftEye = landmarks[LEFT_EYE_CENTRE];
+            const rightEye = landmarks[RIGHT_EYE_CENTRE];
+            
+            // Calculate a simple screen-normalized gaze point
+            // This is an oversimplification but works for basic proof-of-concept
+            const eyeMidX = (leftEye.x + rightEye.x) / 2;
+            const eyeMidY = (leftEye.y + rightEye.y) / 2;
+            
+            // Use the average distance between the eye centers and outer corners
+            const leftEyeWidth = Math.abs(landmarks[LEFT_EYE_OUTER].x - leftEye.x);
+            const rightEyeWidth = Math.abs(landmarks[RIGHT_EYE_OUTER].x - rightEye.x);
+            const eyeScale = (leftEyeWidth + rightEyeWidth) / 2;
+            
+            // Map the eye coordinates to the actual map viewport size
+            const mapRect = map.getContainer().getBoundingClientRect();
+            const gazeMapX = eyeMidX * mapRect.width;
+            const gazeMapY = eyeMidY * mapRect.height;
+            
+            // Get the marker's screen position
+            const markerPos = map.project(MARKER_COORDS);
+            
+            // Calculate distance between Gaze point and Marker point
+            const dist = Math.sqrt(
+                Math.pow(gazeMapX - markerPos.x, 2) + 
+                Math.pow(gazeMapY - markerPos.y, 2)
+            );
+
+            // Check for Gaze Hit
+            const isGazingAtMarker = dist < GAZE_TOLERANCE_PX;
+            
+            if (isGazingAtMarker && !isStareActive) {
+                // User is looking at the marker, increase timer
+                const currentTime = performance.now();
+                const deltaTime = currentTime - lastTime;
+                lastTime = currentTime;
+                
+                gazeHoldTime += deltaTime;
+
+                if (gazeHoldTime >= STARE_DURATION) {
+                    // Stare detected!
+                    isStareActive = true;
+                    if (!window.gazeMarkerPopup.isOpen()) {
+                        window.gazeMarkerPopup.setLngLat(MARKER_COORDS).addTo(map);
+                        // Make the marker briefly "pop" to confirm interaction
+                        window.gazeMarkerElement.style.transform = 'scale(1.5)';
+                        setTimeout(() => {
+                            window.gazeMarkerElement.style.transform = 'scale(1)';
+                        }, 200);
+                    }
+                }
+            } else if (!isGazingAtMarker) {
+                // Gaze moved away, reset timer and active state
+                gazeHoldTime = 0;
+                isStareActive = false;
+                if (window.gazeMarkerPopup.isOpen()) {
+                    // Close the popup when the gaze leaves
+                    window.gazeMarkerPopup.remove();
+                }
+            }
+        }
+    });
+
+    // === 5. Smooth Motion Loop ===
+    function animate(time) {
+        // Ensure lastTime is initialized on first run
+        if (lastTime === 0) lastTime = time; 
+
+        const currentBearing = map.getBearing();
+        const currentPitch = map.getPitch();
+
+        // Smooth interpolation
+        const smooth = 0.1;
+        const newBearing = currentBearing + (targetBearing - currentBearing) * smooth;
+        const newPitch = currentPitch + (targetPitch - currentPitch) * smooth;
+
+        map.setBearing(newBearing);
+        map.setPitch(newPitch);
+
+        requestAnimationFrame(animate);
     }
-  };
-
-  // === 7. Variables for 3D Mode ===
-  let targetBearing = 0;
-  let targetPitch = 60;
-
-  faceMesh.onResults(results => {
-    if (mode !== '3d') return;
-    if (!results.multiFaceLandmarks?.length) return;
-    const landmarks = results.multiFaceLandmarks[0];
-    const nose = landmarks[1];
-    const dx = (nose.x - 0.5);
-    const dy = (nose.y - 0.5);
-    targetBearing = dx * 50;
-    targetPitch = 60 - dy * 40;
-  });
-
-  // === 8. Variables for Gesture Mode ===
-  let lastHandDistance = null;
-
-  hands.onResults(results => {
-    if (mode !== 'gestures') return;
-    if (results.multiHandLandmarks.length === 0) return;
-
-    const handsArr = results.multiHandLandmarks;
-    if (handsArr.length === 2) {
-      const [h1, h2] = handsArr;
-      const dx = Math.abs(h1[0].x - h2[0].x);
-      const dy = Math.abs(h1[0].y - h2[0].y);
-      const dist = Math.sqrt(dx*dx + dy*dy);
-
-      if (lastHandDistance !== null) {
-        if (dist > lastHandDistance + 0.03) map.zoomIn();
-        if (dist < lastHandDistance - 0.03) map.zoomOut();
-      }
-      lastHandDistance = dist;
-    } else if (handsArr.length === 1) {
-      const hand = handsArr[0];
-      const avgX = hand.reduce((sum, p) => sum + p.x, 0) / hand.length;
-      const dx = (avgX - 0.5);
-      map.setBearing(map.getBearing() + dx * 2); // rotate slowly
-    }
-  });
-
-  // === 9. Animation Loop ===
-  function animate() {
-    if (mode === '3d') {
-      const currentBearing = map.getBearing();
-      const currentPitch = map.getPitch();
-      const smooth = 0.1;
-      const newBearing = currentBearing + (targetBearing - currentBearing) * smooth;
-      const newPitch = currentPitch + (targetPitch - currentPitch) * smooth;
-      map.setBearing(newBearing);
-      map.setPitch(newPitch);
-    }
-    requestAnimationFrame(animate);
-  }
-  animate();
+    animate();
 </script>
 
 </body>
