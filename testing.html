@@ -1,0 +1,146 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Head-Tracked 3D Map with Sky & Depth Zoom</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  
+  <!-- MapLibre -->
+  <link href="https://unpkg.com/maplibre-gl@3.6.1/dist/maplibre-gl.css" rel="stylesheet" />
+  <script src="https://unpkg.com/maplibre-gl@3.6.1/dist/maplibre-gl.js"></script>
+
+  <!-- MediaPipe FaceMesh -->
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/face_mesh"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils"></script>
+
+  <style>
+    html, body { margin: 0; height: 100%; overflow: hidden; background: #000; }
+    #map { width: 100%; height: 100%; }
+    video {
+      position: fixed;
+      top: 10px; left: 10px;
+      width: 120px; height: 90px;
+      opacity: 0.3;
+      border-radius: 8px;
+      z-index: 10;
+    }
+  </style>
+</head>
+<body>
+
+<video id="video" autoplay muted playsinline></video>
+<div id="map"></div>
+
+<script>
+  // === 1. Initialize MapLibre ===
+  const map = new maplibregl.Map({
+    container: 'map',
+    style: 'https://tiles.openfreemap.org/styles/liberty',
+    center: [-0.1276, 51.5072],
+    zoom: 16,
+    pitch: 60,
+    bearing: 0,
+    antialias: true
+  });
+
+  // Add sky layer once map loads
+  map.on('load', () => {
+    if (!map.getLayer('sky')) {
+      map.addLayer({
+        id: 'sky',
+        type: 'sky',
+        paint: {
+          'sky-type': 'atmosphere',
+          'sky-atmosphere-sun': [0.0, 0.0],
+          'sky-atmosphere-sun-intensity': 15
+        }
+      });
+    }
+  });
+
+  // === 2. Webcam Setup ===
+  const video = document.getElementById('video');
+  navigator.mediaDevices.getUserMedia({ video: true })
+    .then(stream => {
+      video.srcObject = stream;
+      video.play();
+    })
+    .catch(err => alert("Webcam access denied or unavailable."));
+
+  // === 3. FaceMesh Setup ===
+  const faceMesh = new FaceMesh({ locateFile: (file) => 
+    `https://cdn.jsdelivr.net/npm/@mediapipe/face_mesh/${file}`
+  });
+
+  faceMesh.setOptions({
+    maxNumFaces: 1,
+    refineLandmarks: true,
+    minDetectionConfidence: 0.5,
+    minTrackingConfidence: 0.5
+  });
+
+  const camera = new Camera(video, {
+    onFrame: async () => { await faceMesh.send({ image: video }); },
+    width: 640,
+    height: 480
+  });
+  camera.start();
+
+  // === 4. Tracking Variables ===
+  let targetBearing = 0;
+  let targetPitch = 60;
+  let targetZoom = 16;
+  const BASE_ZOOM = 16;
+
+  // Keep track of initial face width for depth reference
+  let baseFaceWidth = null;
+
+  faceMesh.onResults(results => {
+    if (!results.multiFaceLandmarks?.length) return;
+    const landmarks = results.multiFaceLandmarks[0];
+    const nose = landmarks[1];
+
+    // Horizontal / vertical offsets
+    const dx = (nose.x - 0.5);
+    const dy = (nose.y - 0.5);
+
+    // Map head motion to camera tilt and rotation
+    targetBearing = dx * 50;
+    targetPitch = 60 - dy * 40;
+
+    // --- Depth-based zoom ---
+    // Measure approximate face width between cheek landmarks
+    const leftCheek = landmarks[234];
+    const rightCheek = landmarks[454];
+    const faceWidth = Math.abs(rightCheek.x - leftCheek.x);
+
+    if (!baseFaceWidth) baseFaceWidth = faceWidth;
+    const ratio = baseFaceWidth / faceWidth;
+
+    // Clamp zoom variation to reasonable range
+    const zoomOffset = Math.max(-1, Math.min(1, (ratio - 1) * 4));
+    targetZoom = BASE_ZOOM + zoomOffset;
+  });
+
+  // === 5. Smooth Motion Loop ===
+  function animate() {
+    const currentBearing = map.getBearing();
+    const currentPitch = map.getPitch();
+    const currentZoom = map.getZoom();
+
+    const smooth = 0.1;
+    const newBearing = currentBearing + (targetBearing - currentBearing) * smooth;
+    const newPitch = currentPitch + (targetPitch - currentPitch) * smooth;
+    const newZoom = currentZoom + (targetZoom - currentZoom) * smooth;
+
+    map.setBearing(newBearing);
+    map.setPitch(newPitch);
+    map.setZoom(newZoom);
+
+    requestAnimationFrame(animate);
+  }
+  animate();
+</script>
+
+</body>
+</html>
