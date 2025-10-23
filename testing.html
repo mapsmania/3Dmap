@@ -2,27 +2,57 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8">
-  <title>Head-Tracked 3D Map with Sky & Depth Zoom</title>
+  <title>Head-Tracked 3D Map + Hand Gestures</title>
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  
+
   <!-- MapLibre -->
   <link href="https://unpkg.com/maplibre-gl@3.6.1/dist/maplibre-gl.css" rel="stylesheet" />
   <script src="https://unpkg.com/maplibre-gl@3.6.1/dist/maplibre-gl.js"></script>
 
-  <!-- MediaPipe FaceMesh -->
+  <!-- MediaPipe -->
   <script src="https://cdn.jsdelivr.net/npm/@mediapipe/face_mesh"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands"></script>
   <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils"></script>
 
   <style>
-    html, body { margin: 0; height: 100%; overflow: hidden; background: #000; }
+    html, body { margin: 0; height: 100%; overflow: hidden; }
     #map { width: 100%; height: 100%; }
     video {
       position: fixed;
-      top: 10px; left: 10px;
-      width: 120px; height: 90px;
+      top: 0;
+      left: 0;
+      width: 120px;
+      height: 90px;
       opacity: 0.3;
       border-radius: 8px;
       z-index: 10;
+    }
+    #modeBtn {
+      position: fixed;
+      top: 20px;
+      right: 20px;
+      z-index: 20;
+      padding: 10px 16px;
+      border: none;
+      border-radius: 8px;
+      background: rgba(0,0,0,0.6);
+      color: #fff;
+      font-size: 14px;
+      cursor: pointer;
+    }
+    #overlay {
+      position: fixed;
+      top: 60px;
+      right: 20px;
+      z-index: 20;
+      background: rgba(0,0,0,0.6);
+      color: white;
+      padding: 10px 14px;
+      border-radius: 8px;
+      width: 200px;
+      display: none;
+      font-size: 13px;
+      line-height: 1.4;
     }
   </style>
 </head>
@@ -30,9 +60,16 @@
 
 <video id="video" autoplay muted playsinline></video>
 <div id="map"></div>
+<button id="modeBtn">Switch to Gestures</button>
+<div id="overlay">
+  <strong>Gesture Mode Active</strong><br>
+  🖐️ Move hands apart/together to zoom<br>
+  ↔️ Move one hand left/right to rotate<br>
+  🙌 Keep both hands visible for best results
+</div>
 
 <script>
-  // === 1. Initialize MapLibre ===
+  // === 1. Map Setup ===
   const map = new maplibregl.Map({
     container: 'map',
     style: 'https://tiles.openfreemap.org/styles/liberty',
@@ -43,35 +80,16 @@
     antialias: true
   });
 
-  // Add sky layer once map loads
-  map.on('load', () => {
-    if (!map.getLayer('sky')) {
-      map.addLayer({
-        id: 'sky',
-        type: 'sky',
-        paint: {
-          'sky-type': 'atmosphere',
-          'sky-atmosphere-sun': [0.0, 0.0],
-          'sky-atmosphere-sun-intensity': 15
-        }
-      });
-    }
-  });
-
-  // === 2. Webcam Setup ===
+  // === 2. Webcam ===
   const video = document.getElementById('video');
   navigator.mediaDevices.getUserMedia({ video: true })
-    .then(stream => {
-      video.srcObject = stream;
-      video.play();
-    })
-    .catch(err => alert("Webcam access denied or unavailable."));
+    .then(stream => { video.srcObject = stream; video.play(); })
+    .catch(() => alert("Webcam access denied or unavailable."));
 
-  // === 3. FaceMesh Setup ===
-  const faceMesh = new FaceMesh({ locateFile: (file) => 
-    `https://cdn.jsdelivr.net/npm/@mediapipe/face_mesh/${file}`
+  // === 3. FaceMesh ===
+  const faceMesh = new FaceMesh({ locateFile: f => 
+    `https://cdn.jsdelivr.net/npm/@mediapipe/face_mesh/${f}`
   });
-
   faceMesh.setOptions({
     maxNumFaces: 1,
     refineLandmarks: true,
@@ -79,64 +97,96 @@
     minTrackingConfidence: 0.5
   });
 
+  // === 4. Hands ===
+  const hands = new Hands({ locateFile: f => 
+    `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${f}`
+  });
+  hands.setOptions({
+    maxNumHands: 2,
+    modelComplexity: 1,
+    minDetectionConfidence: 0.6,
+    minTrackingConfidence: 0.6
+  });
+
+  // === 5. Camera ===
   const camera = new Camera(video, {
-    onFrame: async () => { await faceMesh.send({ image: video }); },
+    onFrame: async () => {
+      if (mode === '3d') await faceMesh.send({ image: video });
+      else if (mode === 'gestures') await hands.send({ image: video });
+    },
     width: 640,
     height: 480
   });
   camera.start();
 
-  // === 4. Tracking Variables ===
+  // === 6. Mode Toggle ===
+  let mode = '3d';
+  const btn = document.getElementById('modeBtn');
+  const overlay = document.getElementById('overlay');
+  btn.onclick = () => {
+    mode = mode === '3d' ? 'gestures' : '3d';
+    if (mode === 'gestures') {
+      btn.textContent = "Switch to 3D Mode";
+      overlay.style.display = "block";
+    } else {
+      btn.textContent = "Switch to Gestures";
+      overlay.style.display = "none";
+    }
+  };
+
+  // === 7. Variables for 3D Mode ===
   let targetBearing = 0;
   let targetPitch = 60;
-  let targetZoom = 16;
-  const BASE_ZOOM = 16;
-
-  // Keep track of initial face width for depth reference
-  let baseFaceWidth = null;
 
   faceMesh.onResults(results => {
+    if (mode !== '3d') return;
     if (!results.multiFaceLandmarks?.length) return;
     const landmarks = results.multiFaceLandmarks[0];
     const nose = landmarks[1];
-
-    // Horizontal / vertical offsets
     const dx = (nose.x - 0.5);
     const dy = (nose.y - 0.5);
-
-    // Map head motion to camera tilt and rotation
     targetBearing = dx * 50;
     targetPitch = 60 - dy * 40;
-
-    // --- Depth-based zoom ---
-    // Measure approximate face width between cheek landmarks
-    const leftCheek = landmarks[234];
-    const rightCheek = landmarks[454];
-    const faceWidth = Math.abs(rightCheek.x - leftCheek.x);
-
-    if (!baseFaceWidth) baseFaceWidth = faceWidth;
-    const ratio = baseFaceWidth / faceWidth;
-
-    // Clamp zoom variation to reasonable range
-    const zoomOffset = Math.max(-1, Math.min(1, (ratio - 1) * 4));
-    targetZoom = BASE_ZOOM + zoomOffset;
   });
 
-  // === 5. Smooth Motion Loop ===
+  // === 8. Variables for Gesture Mode ===
+  let lastHandDistance = null;
+
+  hands.onResults(results => {
+    if (mode !== 'gestures') return;
+    if (results.multiHandLandmarks.length === 0) return;
+
+    const handsArr = results.multiHandLandmarks;
+    if (handsArr.length === 2) {
+      const [h1, h2] = handsArr;
+      const dx = Math.abs(h1[0].x - h2[0].x);
+      const dy = Math.abs(h1[0].y - h2[0].y);
+      const dist = Math.sqrt(dx*dx + dy*dy);
+
+      if (lastHandDistance !== null) {
+        if (dist > lastHandDistance + 0.03) map.zoomIn();
+        if (dist < lastHandDistance - 0.03) map.zoomOut();
+      }
+      lastHandDistance = dist;
+    } else if (handsArr.length === 1) {
+      const hand = handsArr[0];
+      const avgX = hand.reduce((sum, p) => sum + p.x, 0) / hand.length;
+      const dx = (avgX - 0.5);
+      map.setBearing(map.getBearing() + dx * 2); // rotate slowly
+    }
+  });
+
+  // === 9. Animation Loop ===
   function animate() {
-    const currentBearing = map.getBearing();
-    const currentPitch = map.getPitch();
-    const currentZoom = map.getZoom();
-
-    const smooth = 0.1;
-    const newBearing = currentBearing + (targetBearing - currentBearing) * smooth;
-    const newPitch = currentPitch + (targetPitch - currentPitch) * smooth;
-    const newZoom = currentZoom + (targetZoom - currentZoom) * smooth;
-
-    map.setBearing(newBearing);
-    map.setPitch(newPitch);
-    map.setZoom(newZoom);
-
+    if (mode === '3d') {
+      const currentBearing = map.getBearing();
+      const currentPitch = map.getPitch();
+      const smooth = 0.1;
+      const newBearing = currentBearing + (targetBearing - currentBearing) * smooth;
+      const newPitch = currentPitch + (targetPitch - currentPitch) * smooth;
+      map.setBearing(newBearing);
+      map.setPitch(newPitch);
+    }
     requestAnimationFrame(animate);
   }
   animate();
