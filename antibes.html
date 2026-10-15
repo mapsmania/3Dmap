@@ -64,7 +64,7 @@ import { OrbitControls } from
 
 import { fromUrl } from
   "https://cdn.jsdelivr.net/npm/geotiff@2.1.4-beta.1/+esm";
-
+    
 const scene = new THREE.Scene();
 scene.background = new THREE.Color(0x101820);
 
@@ -116,14 +116,19 @@ async function loadTerrain() {
     const width = Math.max(2, Math.round(originalWidth * factor));
     const height = Math.max(2, Math.round(originalHeight * factor));
 
-    const raster = await image.readRasters({
-      samples: [0],
-      interleave: true,
-      width,
-      height,
-      resampleMethod: "bilinear"
-    });
+    console.log("GeoTIFF dimensions:", originalWidth, originalHeight);
+console.log("GeoTIFF samples:", image.getSamplesPerPixel());
+console.log("GeoTIFF file loaded; reading raster…");
 
+const raster = await image.readRasters({
+  samples: [0],
+  interleave: true,
+  width: Math.min(width, 250),
+  height: Math.min(height, 250)
+});
+
+console.log("Raster read successfully");
+      
     const noData = image.getGDALNoData();
     const valid = Array.from(raster, Number).filter(v =>
       Number.isFinite(v) &&
