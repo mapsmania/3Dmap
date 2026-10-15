@@ -130,17 +130,32 @@ const raster = await image.readRasters({
 console.log("Raster dimensions:", width, height);
 console.log("Raster values:", raster.length);
       
-    const noData = image.getGDALNoData();
-    const valid = Array.from(raster, Number).filter(v =>
-      Number.isFinite(v) &&
-      !(noData !== null && noData !== undefined &&
-        v === Number(noData))
-    );
+    
+const noData = image.getGDALNoData();
 
-    if (!valid.length) throw new Error("No valid elevation values.");
+let min = Infinity;
+let max = -Infinity;
 
-    const min = Math.min(...valid);
-    const max = Math.max(...valid);
+for (let i = 0; i < raster.length; i++) {
+  const v = Number(raster[i]);
+
+  const isNoData =
+    noData !== null &&
+    noData !== undefined &&
+    v === Number(noData);
+
+  if (Number.isFinite(v) && !isNoData) {
+    if (v < min) min = v;
+    if (v > max) max = v;
+  }
+}
+
+if (!Number.isFinite(min) || !Number.isFinite(max)) {
+  throw new Error("No valid elevation values.");
+}
+
+console.log("Elevation range:", min, max);
+
 
     const mapWidth = bounds[2] - bounds[0];
     const mapHeight = bounds[3] - bounds[1];
