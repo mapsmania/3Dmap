@@ -113,21 +113,22 @@ async function loadTerrain() {
     const factor = Math.min(
       1, 500 / Math.max(originalWidth, originalHeight)
     );
-    const width = Math.max(2, Math.round(originalWidth * factor));
-    const height = Math.max(2, Math.round(originalHeight * factor));
-
-    console.log("GeoTIFF dimensions:", originalWidth, originalHeight);
-console.log("GeoTIFF samples:", image.getSamplesPerPixel());
-console.log("GeoTIFF file loaded; reading raster…");
+    
+      const width = 500;
+const height = Math.round(
+  originalHeight * width / originalWidth
+);
 
 const raster = await image.readRasters({
   samples: [0],
   interleave: true,
-  width: Math.min(width, 250),
-  height: Math.min(height, 250)
+  width,
+  height,
+  resampleMethod: "bilinear"
 });
 
-console.log("Raster read successfully");
+console.log("Raster dimensions:", width, height);
+console.log("Raster values:", raster.length);
       
     const noData = image.getGDALNoData();
     const valid = Array.from(raster, Number).filter(v =>
@@ -253,11 +254,28 @@ function buildTerrain(exaggeration) {
   terrain = new THREE.Mesh(geometry, terrainMaterial);
   scene.add(terrain);
 
-  controls.target.set(
-    0, (max - min) * verticalScale / 3, 0
+  
+  // Automatically frame the terrain in the camera
+  const box = new THREE.Box3().setFromObject(terrain);
+  const size = box.getSize(new THREE.Vector3());
+  const center = box.getCenter(new THREE.Vector3());
+
+  controls.target.copy(center);
+
+  const maxDimension = Math.max(size.x, size.y, size.z);
+  const distance = maxDimension * 1.6;
+
+  camera.position.set(
+    center.x + distance,
+    center.y + distance * 0.8,
+    center.z + distance
   );
-  camera.position.set(90, 85, 110);
+
+  camera.near = 0.1;
+  camera.far = distance * 10;
+  camera.updateProjectionMatrix();
   controls.update();
+
 }
 
 slider.addEventListener("input", () => {
