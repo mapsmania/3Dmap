@@ -1,0 +1,268 @@
+
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Cap d'Antibes 3D Terrain</title>
+
+<style>
+  body {
+    margin: 0;
+    overflow: hidden;
+    background: #101820;
+    color: white;
+    font-family: Arial, sans-serif;
+  }
+
+  #panel {
+    position: absolute;
+    z-index: 2;
+    top: 15px;
+    left: 15px;
+    padding: 14px;
+    background: #172631;
+    border-radius: 8px;
+    max-width: 300px;
+  }
+
+  #exaggeration { width: 150px; }
+  #status { font-size: 13px; margin-top: 10px; }
+  canvas { display: block; }
+</style>
+</head>
+
+<body>
+<div id="panel">
+  <strong>Cap d'Antibes — 3D Terrain</strong>
+  <p>
+    Vertical exaggeration:
+    <span id="exValue">2×</span><br>
+    <input id="exaggeration" type="range"
+           min="0.5" max="5" step="0.25" value="2">
+  </p>
+  <div id="status">Loading elevation data…</div>
+</div>
+
+<script type="module">
+import * as THREE from
+  "https://cdn.jsdelivr.net/npm/three@0.180.0/build/three.module.js";
+
+import { OrbitControls } from
+  "https://cdn.jsdelivr.net/npm/three@0.180.0/examples/jsm/controls/OrbitControls.js";
+
+import { fromUrl } from
+  "https://cdn.jsdelivr.net/npm/geotiff@2.1.3/+esm";
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x101820);
+
+const camera = new THREE.PerspectiveCamera(
+  45, innerWidth / innerHeight, 0.1, 10000
+);
+camera.position.set(90, 85, 110);
+
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setSize(innerWidth, innerHeight);
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.outputColorSpace = THREE.SRGBColorSpace;
+document.body.appendChild(renderer.domElement);
+
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.enableDamping = true;
+
+scene.add(new THREE.HemisphereLight(0xffffff, 0x52616b, 2));
+
+const sun = new THREE.DirectionalLight(0xffffff, 2.5);
+sun.position.set(-40, 100, 60);
+scene.add(sun);
+
+const status = document.querySelector("#status");
+const slider = document.querySelector("#exaggeration");
+const exValue = document.querySelector("#exValue");
+
+let terrain;
+let terrainGeometry;
+let terrainMaterial;
+let terrainSettings;
+
+async function loadTerrain() {
+  try {
+    status.textContent = "Loading GeoTIFF…";
+
+    // GeoTIFF must be in the same folder as this HTML file.
+    const tiff = await fromUrl("./cap_antibes_mapterhorn.tif");
+    const image = await tiff.getImage();
+
+    const originalWidth = image.getWidth();
+    const originalHeight = image.getHeight();
+    const bounds = image.getBoundingBox();
+
+    // Downsample large rasters for browser performance.
+    const factor = Math.min(
+      1, 500 / Math.max(originalWidth, originalHeight)
+    );
+    const width = Math.max(2, Math.round(originalWidth * factor));
+    const height = Math.max(2, Math.round(originalHeight * factor));
+
+    const raster = await image.readRasters({
+      samples: [0],
+      interleave: true,
+      width,
+      height,
+      resampleMethod: "bilinear"
+    });
+
+    const noData = image.getGDALNoData();
+    const valid = Array.from(raster, Number).filter(v =>
+      Number.isFinite(v) &&
+      !(noData !== null && noData !== undefined &&
+        v === Number(noData))
+    );
+
+    if (!valid.length) throw new Error("No valid elevation values.");
+
+    const min = Math.min(...valid);
+    const max = Math.max(...valid);
+
+    const mapWidth = bounds[2] - bounds[0];
+    const mapHeight = bounds[3] - bounds[1];
+
+    if (!(mapWidth > 0 && mapHeight > 0)) {
+      throw new Error("Invalid GeoTIFF bounds.");
+    }
+
+    const worldWidth = 100;
+    const worldDepth = worldWidth * mapHeight / mapWidth;
+
+    terrainSettings = {
+      raster, width, height, min, max,
+      worldWidth, worldDepth, noData, mapWidth
+    };
+
+    buildTerrain(Number(slider.value));
+
+    status.textContent =
+      `${width} × ${height} grid | Elevation: ` +
+      `${min.toFixed(1)}–${max.toFixed(1)} m`;
+
+  } catch (error) {
+    console.error(error);
+    status.textContent =
+      "Could not load GeoTIFF: " + error.message +
+      ". Check the filename and that it is published on GitHub Pages.";
+  }
+}
+
+function buildTerrain(exaggeration) {
+  const {
+    raster, width, height, min, max,
+    worldWidth, worldDepth, noData, mapWidth
+  } = terrainSettings;
+
+  const verticalScale = worldWidth / mapWidth * exaggeration;
+
+  const positions = [];
+  const colours = [];
+  const indices = [];
+
+  const low = new THREE.Color(0x397653);
+  const middle = new THREE.Color(0xc4ad78);
+  const high = new THREE.Color(0xf0eee5);
+  const colour = new THREE.Color();
+
+  for (let y = 0; y < height; y++) {
+    for (let x = 0; x < width; x++) {
+      const i = y * width + x;
+      const elevation = Number(raster[i]);
+
+      const isValid = Number.isFinite(elevation) &&
+        !(noData !== null && noData !== undefined &&
+          elevation === Number(noData));
+
+      const zHeight = isValid ? elevation : min;
+
+      positions.push(
+        (x / (width - 1) - 0.5) * worldWidth,
+        (zHeight - min) * verticalScale,
+        (y / (height - 1) - 0.5) * worldDepth
+      );
+
+      const t = max > min ? (zHeight - min) / (max - min) : 0;
+
+      if (t < 0.55) {
+        colour.copy(low).lerp(middle, t / 0.55);
+      } else {
+        colour.copy(middle).lerp(high, (t - 0.55) / 0.45);
+      }
+
+      if (!isValid) colour.setHex(0x52616b);
+
+      colours.push(colour.r, colour.g, colour.b);
+
+      if (x < width - 1 && y < height - 1) {
+        const a = i;
+        const b = i + 1;
+        const c = i + width;
+        const d = i + width + 1;
+        indices.push(a, c, b, b, c, d);
+      }
+    }
+  }
+
+  const geometry = new THREE.BufferGeometry();
+  geometry.setAttribute(
+    "position", new THREE.Float32BufferAttribute(positions, 3)
+  );
+  geometry.setAttribute(
+    "color", new THREE.Float32BufferAttribute(colours, 3)
+  );
+  geometry.setIndex(indices);
+  geometry.computeVertexNormals();
+
+  if (terrain) {
+    scene.remove(terrain);
+    terrainGeometry.dispose();
+    terrainMaterial.dispose();
+  }
+
+  terrainGeometry = geometry;
+  terrainMaterial = new THREE.MeshStandardMaterial({
+    vertexColors: true,
+    roughness: 1,
+    metalness: 0,
+    side: THREE.DoubleSide
+  });
+
+  terrain = new THREE.Mesh(geometry, terrainMaterial);
+  scene.add(terrain);
+
+  controls.target.set(
+    0, (max - min) * verticalScale / 3, 0
+  );
+  camera.position.set(90, 85, 110);
+  controls.update();
+}
+
+slider.addEventListener("input", () => {
+  exValue.textContent = slider.value + "×";
+  if (terrainSettings) buildTerrain(Number(slider.value));
+});
+
+loadTerrain();
+
+function animate() {
+  requestAnimationFrame(animate);
+  controls.update();
+  renderer.render(scene, camera);
+}
+animate();
+
+window.addEventListener("resize", () => {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+</script>
+</body>
+</html>
