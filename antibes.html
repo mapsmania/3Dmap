@@ -39,7 +39,7 @@
     Vertical exaggeration:
     <span id="exValue">2×</span><br>
     <input id="exaggeration" type="range"
-           min="0.5" max="5" step="0.25" value="2">
+       min="0.5" max="10" step="0.25" value="4">
   </p>
   <div id="status">Loading elevation data…</div>
 </div>
@@ -278,13 +278,15 @@ function buildTerrain(exaggeration) {
   controls.target.copy(center);
 
   const maxDimension = Math.max(size.x, size.y, size.z);
-  const distance = maxDimension * 1.6;
 
-  camera.position.set(
-    center.x + distance,
-    center.y + distance * 0.8,
-    center.z + distance
-  );
+// Bring the camera closer to make the terrain appear larger.
+const distance = maxDimension * 0.8;
+
+camera.position.set(
+  center.x + distance,
+  center.y + distance * 0.8,
+  center.z + distance
+);
 
   camera.near = 0.1;
   camera.far = distance * 10;
