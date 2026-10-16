@@ -178,7 +178,6 @@ function buildTerrain(exaggeration) {
   const high = new THREE.Color(0xf0eee5);  
   const colour = new THREE.Color();
 
-  // Helper to filter out nodata and sea level pixels so water shows through
   const validAt = (index) => {
     const v = Number(raster[index]);
     const isNoData = noData !== null && noData !== undefined && v === Number(noData);
@@ -252,8 +251,10 @@ function buildTerrain(exaggeration) {
   terrain = new THREE.Mesh(geometry, terrainMaterial);
   scene.add(terrain);
 
-  // Mediterranean Sea plane at zero metres elevation
-  const seaLevelY = (0 - min) * verticalScale;
+  // --- ADJUST SEA LEVEL HERE ---
+  // Change seaLevelMeters to raise or lower the water line relative to the terrain
+  const seaLevelMeters = 3.0; // Try increasing this if water is still too low (e.g., 5.0, 10.0)
+  const seaLevelY = (seaLevelMeters - min) * verticalScale;
 
   if (!seaPlane) {
     const seaGeometry = new THREE.PlaneGeometry(
@@ -273,7 +274,7 @@ function buildTerrain(exaggeration) {
     scene.add(seaPlane);
   }
 
-  seaPlane.position.set(0, seaLevelY + 0.25 * verticalScale, 0);
+  seaPlane.position.set(0, seaLevelY, 0);
 
   // Automatically frame the terrain in the camera
   const box = new THREE.Box3().setFromObject(terrain);
