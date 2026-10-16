@@ -238,12 +238,29 @@ const colour = new THREE.Color();
   const c = i + width;
   const d = i + width + 1;
 
-  const validAt = (index) => {
-  const v = Number(raster[index]);
-  const isNoData = noData !== null && noData !== undefined && v === Number(noData);
-  // Ignore values that are nodata OR at/below sea level (sea will be handled by the seaPlane)
-  return Number.isFinite(v) && !isNoData && v > 0.5; 
-};
+  // Inside buildTerrain, update your validAt helper:
+  if (x < width - 1 && y < height - 1) {
+    const a = i;
+    const b = i + 1;
+    const c = i + width;
+    const d = i + width + 1;
+
+    const validAt = (index) => {
+      const v = Number(raster[index]);
+      const isNoData = noData !== null && noData !== undefined && v === Number(noData);
+      
+      // FIX: Also treat any elevation at or below sea level (<= 0.5m) as water/invalid for land
+      return Number.isFinite(v) && !isNoData && v > 0.5;
+    };
+
+    if (validAt(a) && validAt(b) && validAt(c)) {
+      indices.push(a, c, b);
+    }
+
+    if (validAt(b) && validAt(c) && validAt(d)) {
+      indices.push(b, c, d);
+    }
+  }
 
   if (validAt(a) && validAt(b) && validAt(c)) {
     indices.push(a, c, b);
