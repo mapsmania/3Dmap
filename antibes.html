@@ -229,17 +229,30 @@ function buildTerrain(exaggeration) {
         colour.copy(middle).lerp(high, (t - 0.55) / 0.45);
       }
 
-      if (!isValid) colour.setHex(0x52616b);
 
       colours.push(colour.r, colour.g, colour.b);
 
       if (x < width - 1 && y < height - 1) {
-        const a = i;
-        const b = i + 1;
-        const c = i + width;
-        const d = i + width + 1;
-        indices.push(a, c, b, b, c, d);
-      }
+  const a = i;
+  const b = i + 1;
+  const c = i + width;
+  const d = i + width + 1;
+
+  const validAt = (index) => {
+    const v = Number(raster[index]);
+    return Number.isFinite(v) &&
+      !(noData !== null && noData !== undefined &&
+        v === Number(noData));
+  };
+
+  if (validAt(a) && validAt(b) && validAt(c)) {
+    indices.push(a, c, b);
+  }
+
+  if (validAt(b) && validAt(c) && validAt(d)) {
+    indices.push(b, c, d);
+  }
+}
     }
   }
 
@@ -261,11 +274,13 @@ function buildTerrain(exaggeration) {
 
   terrainGeometry = geometry;
   terrainMaterial = new THREE.MeshStandardMaterial({
-    vertexColors: true,
-    roughness: 1,
-    metalness: 0,
-    side: THREE.DoubleSide
-  });
+  vertexColors: true,
+  roughness: 1,
+  metalness: 0,
+  side: THREE.DoubleSide,
+  transparent: true,
+  opacity: 1
+});
 
   terrain = new THREE.Mesh(geometry, terrainMaterial);
   scene.add(terrain);
