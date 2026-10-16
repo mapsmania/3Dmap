@@ -253,7 +253,7 @@ function buildTerrain(exaggeration) {
 
   // --- ADJUST SEA LEVEL HERE ---
   // Change seaLevelMeters to raise or lower the water line relative to the terrain
-  const seaLevelMeters = 3.0; // Try increasing this if water is still too low (e.g., 5.0, 10.0)
+  const seaLevelMeters = 16.0; // Try increasing this if water is still too low (e.g., 5.0, 10.0)
   const seaLevelY = (seaLevelMeters - min) * verticalScale;
 
   if (!seaPlane) {
