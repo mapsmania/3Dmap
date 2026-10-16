@@ -310,9 +310,8 @@ const colour = new THREE.Color();
     scene.add(seaPlane);
   }
 
-  // Place the water just above the zero-metre elevation.
-  seaPlane.position.set(0, seaLevelY + 0.01, 0);
-
+  // Increase the offset so the water sits safely above coastal artifacts
+seaPlane.position.set(0, seaLevelY + 0.25 * verticalScale, 0);
 
   
   // Automatically frame the terrain in the camera
