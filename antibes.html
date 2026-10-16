@@ -96,6 +96,7 @@ let terrain;
 let terrainGeometry;
 let terrainMaterial;
 let terrainSettings;
+let seaPlane;
 
 async function loadTerrain() {
   try {
@@ -268,6 +269,35 @@ function buildTerrain(exaggeration) {
 
   terrain = new THREE.Mesh(geometry, terrainMaterial);
   scene.add(terrain);
+
+  
+  // Mediterranean Sea plane at zero metres elevation
+  const seaLevelY = (0 - min) * verticalScale;
+
+  if (!seaPlane) {
+    const seaGeometry = new THREE.PlaneGeometry(
+      worldWidth * 2.5,
+      worldDepth * 2.5
+    );
+
+    const seaMaterial = new THREE.MeshStandardMaterial({
+      color: 0x168aad,
+      roughness: 0.4,
+      metalness: 0.05,
+      side: THREE.DoubleSide
+    });
+
+    seaPlane = new THREE.Mesh(seaGeometry, seaMaterial);
+
+    // Rotate the plane so it lies horizontally in the XZ plane.
+    seaPlane.rotation.x = -Math.PI / 2;
+
+    scene.add(seaPlane);
+  }
+
+  // Place the water just above the zero-metre elevation.
+  seaPlane.position.set(0, seaLevelY + 0.01, 0);
+
 
   
   // Automatically frame the terrain in the camera
