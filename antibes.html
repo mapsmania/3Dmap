@@ -26,23 +26,32 @@
   }
 
   #exaggeration { width: 150px; }
-  #status { font-size: 13px; margin-top: 10px; }
   canvas { display: block; }
 </style>
 </head>
 
 <body>
+
 <div id="panel">
-  <strong>Cap d'Antibes — 3D Terrain</strong>
+  <strong>Cap d'Antibes</strong>
   <p>
     Vertical exaggeration:
-    <span id="exValue">2×</span><br>
+    <span id="exValue">4×</span><br>
     <input id="exaggeration" type="range"
-       min="0.5" max="10" step="0.25" value="4">
+      min="0.5" max="10" step="0.25" value="4">
   </p>
-  <div id="status">Loading elevation data…</div>
+  <button id="playBtn" style="
+    width: 100%;
+    padding: 8px;
+    background: #209c7a;
+    color: white;
+    border: none;
+    border-radius: 4px;
+    cursor: pointer;
+    font-weight: bold;
+  ">▶ Play Walk Animation</button>
 </div>
-
+    
 <script type="importmap">
 {
   "imports": {
@@ -50,60 +59,152 @@
     "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.180.0/examples/jsm/"
   }
 }
-</script>    
+</script>
 
 <script type="module">
 
 import * as THREE from "three";
 import { OrbitControls } from "three/addons/controls/OrbitControls.js";
+import {
+  CSS2DRenderer,
+  CSS2DObject
+} from "three/addons/renderers/CSS2DRenderer.js";
 import { fromUrl } from "https://cdn.jsdelivr.net/npm/geotiff@2.1.4-beta.1/+esm";
-    
+
+// --------------------------------------------------
+// SCENE
+// --------------------------------------------------
+
 const scene = new THREE.Scene();
 scene.background = new THREE.Color("#168aad");
-    
+
 const camera = new THREE.PerspectiveCamera(
   45, innerWidth / innerHeight, 0.1, 10000
 );
+
 camera.position.set(90, 85, 110);
 
-const renderer = new THREE.WebGLRenderer({ antialias: true });
+const renderer = new THREE.WebGLRenderer({
+  antialias: true
+});
+
 renderer.setSize(innerWidth, innerHeight);
 renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
 renderer.outputColorSpace = THREE.SRGBColorSpace;
+
 document.body.appendChild(renderer.domElement);
 
-const controls = new OrbitControls(camera, renderer.domElement);
+// CSS2D renderer for POI labels
+const labelRenderer = new CSS2DRenderer();
+labelRenderer.setSize(innerWidth, innerHeight);
+
+Object.assign(labelRenderer.domElement.style, {
+  position: "absolute",
+  top: "0",
+  left: "0",
+  pointerEvents: "none",
+  zIndex: "1"
+});
+    
+document.body.appendChild(labelRenderer.domElement);
+
+// Camera controls
+const controls = new OrbitControls(
+  camera,
+  renderer.domElement
+);
+
 controls.enableDamping = true;
 
-scene.add(new THREE.HemisphereLight(0xffffff, 0x52616b, 2));
+// Lighting
+scene.add(
+  new THREE.HemisphereLight(0xffffff, 0x52616b, 2)
+);
 
 const sun = new THREE.DirectionalLight(0xffffff, 2.5);
 sun.position.set(-40, 100, 60);
 scene.add(sun);
 
-const status = document.querySelector("#status");
+// --------------------------------------------------
+// VARIABLES
+// --------------------------------------------------
+
 const slider = document.querySelector("#exaggeration");
 const exValue = document.querySelector("#exValue");
+const playBtn = document.querySelector("#playBtn");
 
 let terrain;
 let terrainGeometry;
 let terrainMaterial;
 let terrainSettings;
 let seaPlane;
+let walkLine = null;
+let walkPoints = [];
+let walkStartTime = null;
+let walkRoute3D = [];      
+let smoothCurve = null;
+
+const walkDuration = 20000; // 20 seconds to draw the route      
+
+let poiMarker;
+let poiLabel;
+
+// Play button event listener
+playBtn.addEventListener("click", () => {
+  if (!walkLine || walkRoute3D.length < 2 || !smoothCurve) return;
+
+  // Reset line draw range to 0
+  walkLine.geometry.setDrawRange(0, 0);
+
+  // Instantly snap camera and target to the start of the route for a clean replay
+  const startPoint = smoothCurve.getPoint(0);
+  const aheadPoint = smoothCurve.getPoint(0.03);
+
+  const dir = new THREE.Vector3(
+    aheadPoint.x - startPoint.x,
+    0,
+    aheadPoint.z - startPoint.z
+  ).normalize();
+
+  camera.position.set(
+    startPoint.x - dir.x * 12,
+    startPoint.y + 9,
+    startPoint.z - dir.z * 12
+  );
+
+  controls.target.set(
+    aheadPoint.x,
+    aheadPoint.y + 2,
+    aheadPoint.z
+  );
+  controls.update();
+
+  // Start the animation timer
+  walkStartTime = performance.now();
+});
+
+// --------------------------------------------------
+// LOAD GEOTIFF
+// --------------------------------------------------
 
 async function loadTerrain() {
   try {
-    status.textContent = "Loading GeoTIFF…";
+    const tiff = await fromUrl(
+      "https://mapsmania.github.io/3Dmap/mapterhorn_mosaic.tif"
+    );
 
-    const tiff = await fromUrl("./cap_antibes_mapterhorn.tif");
     const image = await tiff.getImage();
 
     const originalWidth = image.getWidth();
     const originalHeight = image.getHeight();
     const bounds = image.getBoundingBox();
-    
+    const geoKeys = image.getGeoKeys();
+
+    // Downsample for performance
     const width = 500;
-    const height = Math.round(originalHeight * width / originalWidth);
+    const height = Math.round(
+      originalHeight * width / originalWidth
+    );
 
     const raster = await image.readRasters({
       samples: [0],
@@ -112,7 +213,7 @@ async function loadTerrain() {
       height,
       resampleMethod: "bilinear"
     });
-      
+
     const noData = image.getGDALNoData();
 
     let min = Infinity;
@@ -120,7 +221,11 @@ async function loadTerrain() {
 
     for (let i = 0; i < raster.length; i++) {
       const v = Number(raster[i]);
-      const isNoData = noData !== null && noData !== undefined && v === Number(noData);
+
+      const isNoData =
+        noData !== null &&
+        noData !== undefined &&
+        v === Number(noData);
 
       if (Number.isFinite(v) && !isNoData) {
         if (v < min) min = v;
@@ -132,65 +237,109 @@ async function loadTerrain() {
       throw new Error("No valid elevation values.");
     }
 
-    const mapWidth = bounds[2] - bounds[0];
-    const mapHeight = bounds[3] - bounds[1];
+    const boundsWidth = bounds[2] - bounds[0];
+    const boundsHeight = bounds[3] - bounds[1];
 
-    if (!(mapWidth > 0 && mapHeight > 0)) {
+    if (!(boundsWidth > 0 && boundsHeight > 0)) {
       throw new Error("Invalid GeoTIFF bounds.");
+    }
+
+    const isGeographic =
+      Number(geoKeys?.GeographicTypeGeoKey) === 4326;
+
+    let mapWidth;
+    let mapHeight;
+
+    if (isGeographic) {
+      const centerLat = (bounds[1] + bounds[3]) / 2;
+
+      const metresPerDegreeLatitude = 111320;
+      const metresPerDegreeLongitude =
+        111320 * Math.cos(centerLat * Math.PI / 180);
+
+      mapWidth = boundsWidth * metresPerDegreeLongitude;
+      mapHeight = boundsHeight * metresPerDegreeLatitude;
+    } else {
+      mapWidth = boundsWidth;
+      mapHeight = boundsHeight;
     }
 
     const worldWidth = 100;
     const worldDepth = worldWidth * mapHeight / mapWidth;
 
     terrainSettings = {
-      raster, width, height, min, max,
-      worldWidth, worldDepth, noData, mapWidth
+      raster,
+      width,
+      height,
+      min,
+      max,
+      worldWidth,
+      worldDepth,
+      noData,
+      mapWidth,
+      mapHeight,
+      bounds,
+      boundsWidth,
+      boundsHeight
     };
 
     buildTerrain(Number(slider.value));
-
-    status.textContent =
-      `${width} × ${height} grid | Elevation: ` +
-      `${min.toFixed(1)}–${max.toFixed(1)} m`;
+    loadWalkRoute();  
 
   } catch (error) {
     console.error(error);
-    status.textContent =
-      "Could not load GeoTIFF: " + error.message +
-      ". Check the filename and that it is published on GitHub Pages.";
   }
 }
 
+// --------------------------------------------------
+// BUILD TERRAIN
+// --------------------------------------------------
+
 function buildTerrain(exaggeration) {
   const {
-    raster, width, height, min, max,
-    worldWidth, worldDepth, noData, mapWidth
+    raster,
+    width,
+    height,
+    min,
+    max,
+    worldWidth,
+    worldDepth,
+    noData,
+    mapWidth
   } = terrainSettings;
 
-  const verticalScale = worldWidth / mapWidth * exaggeration;
+  const verticalScale =
+    worldWidth / mapWidth * exaggeration;
 
   const positions = [];
   const colours = [];
   const indices = [];
 
-  const low = new THREE.Color(0xd2b48c); // Tan / Sand
-  const middle = new THREE.Color(0x397653); // Green further up
-  const high = new THREE.Color(0xf0eee5);  
+  const sandOrRock = new THREE.Color(0xd2b48c);
+  const darkForest = new THREE.Color(0x224023);
   const colour = new THREE.Color();
+
+  const seaLevelMeters = 2;
+  const treeHeight = 10;
 
   const validAt = (index) => {
     const v = Number(raster[index]);
-    const isNoData = noData !== null && noData !== undefined && v === Number(noData);
-    return Number.isFinite(v) && !isNoData && v > 0.5;
+
+    const isNoData =
+      noData !== null &&
+      noData !== undefined &&
+      v === Number(noData);
+
+    return Number.isFinite(v) && !isNoData;
   };
 
   for (let y = 0; y < height; y++) {
     for (let x = 0; x < width; x++) {
+
       const i = y * width + x;
       const elevation = Number(raster[i]);
-      const isValid = Number.isFinite(elevation) &&
-        !(noData !== null && noData !== undefined && elevation === Number(noData));
 
+      const isValid = validAt(i);
       const zHeight = isValid ? elevation : min;
 
       positions.push(
@@ -199,12 +348,16 @@ function buildTerrain(exaggeration) {
         (y / (height - 1) - 0.5) * worldDepth
       );
 
-      const t = max > min ? (zHeight - min) / (max - min) : 0;
-
-      if (t < 0.55) {
-        colour.copy(low).lerp(middle, t / 0.55);
+      if (zHeight <= seaLevelMeters) {
+        colour.copy(sandOrRock);
+      } else if (zHeight >= treeHeight) {
+        colour.copy(darkForest);
       } else {
-        colour.copy(middle).lerp(high, (t - 0.55) / 0.45);
+        const factor =
+          (zHeight - seaLevelMeters) /
+          (treeHeight - seaLevelMeters);
+
+        colour.copy(sandOrRock).lerp(darkForest, factor);
       }
 
       colours.push(colour.r, colour.g, colour.b);
@@ -227,10 +380,20 @@ function buildTerrain(exaggeration) {
   }
 
   const geometry = new THREE.BufferGeometry();
-  geometry.setAttribute("position", new THREE.Float32BufferAttribute(positions, 3));
-  geometry.setAttribute("color", new THREE.Float32BufferAttribute(colours, 3));
+
+  geometry.setAttribute(
+    "position",
+    new THREE.Float32BufferAttribute(positions, 3)
+  );
+
+  geometry.setAttribute(
+    "color",
+    new THREE.Float32BufferAttribute(colours, 3)
+  );
+
   geometry.setIndex(indices);
   geometry.computeVertexNormals();
+  geometry.computeBoundingBox();
 
   if (terrain) {
     scene.remove(terrain);
@@ -239,22 +402,23 @@ function buildTerrain(exaggeration) {
   }
 
   terrainGeometry = geometry;
+
   terrainMaterial = new THREE.MeshStandardMaterial({
     vertexColors: true,
     roughness: 1,
     metalness: 0,
-    side: THREE.DoubleSide,
-    transparent: true,
-    opacity: 1
+    side: THREE.DoubleSide
   });
 
-  terrain = new THREE.Mesh(geometry, terrainMaterial);
+  terrain = new THREE.Mesh(
+    geometry,
+    terrainMaterial
+  );
+
   scene.add(terrain);
 
-  // --- ADJUST SEA LEVEL HERE ---
-  // Change seaLevelMeters to raise or lower the water line relative to the terrain
-  const seaLevelMeters = 16.0; // Try increasing this if water is still too low (e.g., 5.0, 10.0)
-  const seaLevelY = (seaLevelMeters - min) * verticalScale;
+  const seaLevelY =
+    (seaLevelMeters - min) * verticalScale;
 
   if (!seaPlane) {
     const seaGeometry = new THREE.PlaneGeometry(
@@ -269,54 +433,538 @@ function buildTerrain(exaggeration) {
       side: THREE.DoubleSide
     });
 
-    seaPlane = new THREE.Mesh(seaGeometry, seaMaterial);
+    seaPlane = new THREE.Mesh(
+      seaGeometry,
+      seaMaterial
+    );
+
     seaPlane.rotation.x = -Math.PI / 2;
     scene.add(seaPlane);
   }
 
-  seaPlane.position.set(0, seaLevelY, 0);
+  seaPlane.position.y = seaLevelY;
+  seaPlane.visible = true;
 
-  // Automatically frame the terrain in the camera
   const box = new THREE.Box3().setFromObject(terrain);
   const size = box.getSize(new THREE.Vector3());
-  const center = box.getCenter(new THREE.Vector3());
 
-  controls.target.copy(center);
+  const lighthouseLon = 7.133220614099022;
+  const lighthouseLat = 43.564562428428005;
 
-  const maxDimension = Math.max(size.x, size.y, size.z);
-  const distance = maxDimension * 0.8;
+  const { bounds, boundsWidth, boundsHeight } = terrainSettings;
+
+  const nx = (lighthouseLon - bounds[0]) / boundsWidth;
+  const ny = (bounds[3] - lighthouseLat) / boundsHeight;
+
+  const lighthouseX = (nx - 0.5) * worldWidth;
+  const lighthouseZ = (ny - 0.5) * worldDepth;
+
+  const col = Math.max(
+    0,
+    Math.min(width - 1, Math.round(nx * (width - 1)))
+  );
+
+  const row = Math.max(
+    0,
+    Math.min(height - 1, Math.round(ny * (height - 1)))
+  );
+
+  const lighthouseElevation = Number(raster[row * width + col]);
+  const lighthouseY = (lighthouseElevation - min) * verticalScale;
+
+  const target = new THREE.Vector3(
+    lighthouseX,
+    lighthouseY,
+    lighthouseZ
+  );
+
+  controls.target.copy(target);
+
+  const horizontalSize = Math.max(size.x, size.z);
+  const distance = horizontalSize * 0.3;
 
   camera.position.set(
-    center.x + distance,
-    center.y + distance * 0.8,
-    center.z + distance
+    target.x + distance * 0.8,
+    target.y + Math.max(size.y * 1.2, distance * 0.7),
+    target.z + distance * 0.8
   );
 
   camera.near = 0.1;
-  camera.far = distance * 10;
+  camera.far = Math.max(1000, distance * 20, size.y * 5);
   camera.updateProjectionMatrix();
+
   controls.update();
+
+  addPOIs();
+  if (walkPoints.length > 0) {
+    buildWalkLine();
+  }  
 }
+
+// --------------------------------------------------
+// PHOTO POPUPS
+// --------------------------------------------------
+
+const photoPopup = document.createElement("div");
+Object.assign(photoPopup.style, {
+  display: "none",
+  position: "fixed",
+  inset: "0",
+  zIndex: "1000",
+  background: "rgba(0, 0, 0, 0.8)",
+  alignItems: "center",
+  justifyContent: "center",
+  padding: "20px",
+  boxSizing: "border-box"
+});
+photoPopup.innerHTML = `
+  <div style="position:relative;max-width:850px;width:100%;background:#14232d;padding:12px;border-radius:8px;box-sizing:border-box;">
+    <button id="closePhoto" style="position:absolute;top:18px;right:18px;z-index:2;font-size:24px;cursor:pointer;color:white;background:rgba(0,0,0,0.7);border:0;border-radius:4px;padding:3px 10px;">×</button>
+    <img src="https://mapsmania.github.io/3Dmap/millions.jpg" alt="Baie des Milliardaires, Cap d’Antibes" style="display:block;width:100%;height:auto;border-radius:4px;">
+    <div style="color:white;padding:10px 2px 2px;font: bold 15px Arial,sans-serif;">Baie des Milliardaires</div>
+  </div>
+`;
+document.body.appendChild(photoPopup);
+function openBayPhoto() { photoPopup.style.display = "flex"; }
+function closeBayPhoto() { photoPopup.style.display = "none"; }
+photoPopup.querySelector("#closePhoto").addEventListener("click", closeBayPhoto);
+photoPopup.addEventListener("click", (e) => { if (e.target === photoPopup) closeBayPhoto(); });
+
+const lighthousePhotoPopup = document.createElement("div");
+Object.assign(lighthousePhotoPopup.style, {
+  display: "none", position: "fixed", inset: "0", zIndex: "1000", background: "rgba(0, 0, 0, 0.8)", alignItems: "center", justifyContent: "center", padding: "20px", boxSizing: "border-box"
+});
+lighthousePhotoPopup.innerHTML = `
+  <div style="position:relative;max-width:850px;width:100%;background:#14232d;padding:12px;border-radius:8px;box-sizing:border-box;">
+    <button id="closeLighthousePhoto" style="position:absolute;top:18px;right:18px;z-index:2;font-size:24px;cursor:pointer;color:white;background:rgba(0,0,0,0.7);border:0;border-radius:4px;padding:3px 10px;">×</button>
+    <img src="https://mapsmania.github.io/3Dmap/lighthouse.jpg" alt="La Garoupe Lighthouse" style="display:block;width:100%;height:auto;border-radius:4px;">
+    <div style="color:white;padding:10px 2px 2px;font:bold 15px Arial,sans-serif;">La Garoupe Lighthouse</div>
+  </div>
+`;
+document.body.appendChild(lighthousePhotoPopup);
+function openLighthousePhoto() { lighthousePhotoPopup.style.display = "flex"; }
+function closeLighthousePhoto() { lighthousePhotoPopup.style.display = "none"; }
+lighthousePhotoPopup.querySelector("#closeLighthousePhoto").addEventListener("click", closeLighthousePhoto);
+lighthousePhotoPopup.addEventListener("click", (e) => { if (e.target === lighthousePhotoPopup) closeLighthousePhoto(); });
+
+const tirepoilPhotoPopup = document.createElement("div");
+Object.assign(tirepoilPhotoPopup.style, {
+  display: "none", position: "fixed", inset: "0", zIndex: "1000", background: "rgba(0, 0, 0, 0.8)", alignItems: "center", justifyContent: "center", padding: "20px", boxSizing: "border-box"
+});
+tirepoilPhotoPopup.innerHTML = `
+  <div style="position:relative;max-width:850px;width:100%;background:#14232d;padding:12px;border-radius:8px;box-sizing:border-box;">
+    <button id="closeTirepoilPhoto" style="position:absolute;top:18px;right:18px;z-index:2;font-size:24px;cursor:pointer;color:white;background:rgba(0,0,0,0.7);border:0;border-radius:4px;padding:3px 10px;">×</button>
+    <img src="https://mapsmania.github.io/3Dmap/walk.jpg" alt="Sentier de Tirepoil" style="display:block;width:100%;height:auto;border-radius:4px;">
+    <div style="color:white;padding:10px 2px 2px;font:bold 15px Arial,sans-serif;">Sentier de Tirepoil</div>
+  </div>
+`;
+document.body.appendChild(tirepoilPhotoPopup);
+function openTirepoilPhoto() { tirepoilPhotoPopup.style.display = "flex"; }
+function closeTirepoilPhoto() { tirepoilPhotoPopup.style.display = "none"; }
+tirepoilPhotoPopup.querySelector("#closeTirepoilPhoto").addEventListener("click", closeTirepoilPhoto);
+tirepoilPhotoPopup.addEventListener("click", (e) => { if (e.target === tirepoilPhotoPopup) closeTirepoilPhoto(); });
+
+document.addEventListener("keydown", (event) => {
+  if (event.key === "Escape") {
+    closeBayPhoto();
+    closeLighthousePhoto();
+    closeTirepoilPhoto();
+  }
+});
+
+// --------------------------------------------------
+// POIs
+// --------------------------------------------------
+
+function addPOIs() {
+  const {
+    raster,
+    width,
+    height,
+    min,
+    worldWidth,
+    worldDepth,
+    noData,
+    mapWidth,
+    bounds,
+    boundsWidth,
+    boundsHeight
+  } = terrainSettings;
+
+  const locations = [
+    { name: "La Garoupe Lighthouse", lat: 43.564562428428005, lon: 7.133220614099022, color: 0xffdd44 },
+    { name: "Plage de la Garoupe", lat: 43.55442811847474, lon: 7.136192821110478, color: 0x00ffff },
+    { name: "Baie des Milliardaires", lat: 43.54661359799314, lon: 7.12939738984535, color: 0x00ffff },
+    { name: "Sentier de Tirepoil", lat: 43.55199532596954, lon: 7.1434572840528, color: 0x00ffff },
+  ];
+
+  if (!addPOIs.markers) addPOIs.markers = [];
+  if (!addPOIs.labels) addPOIs.labels = [];
+
+  for (const marker of addPOIs.markers) {
+    scene.remove(marker);
+    marker.traverse((object) => {
+      if (object.geometry) object.geometry.dispose();
+      if (object.material) object.material.dispose();
+    });
+  }
+
+  for (const label of addPOIs.labels) {
+    scene.remove(label);
+    label.element.remove();
+  }
+
+  addPOIs.markers = [];
+  addPOIs.labels = [];
+
+  const verticalScale = worldWidth / mapWidth * Number(slider.value);
+
+  for (const location of locations) {
+    const { name, lat, lon, color } = location;
+
+    const nx = (lon - bounds[0]) / boundsWidth;
+    const ny = (bounds[3] - lat) / boundsHeight;
+
+    if (nx < 0 || nx > 1 || ny < 0 || ny > 1) continue;
+
+    const x = (nx - 0.5) * worldWidth;
+    const z = (ny - 0.5) * worldDepth;
+
+    const col = Math.max(0, Math.min(width - 1, Math.round(nx * (width - 1))));
+    const row = Math.max(0, Math.min(height - 1, Math.round(ny * (height - 1))));
+
+    const elevation = Number(raster[row * width + col]);
+    const isNoData = noData !== null && noData !== undefined && elevation === Number(noData);
+
+    if (!Number.isFinite(elevation) || isNoData) continue;
+
+    const groundY = (elevation - min) * verticalScale;
+    const lineHeight = 8;
+
+    const group = new THREE.Group();
+    const lineGeometry = new THREE.BufferGeometry();
+    lineGeometry.setFromPoints([
+      new THREE.Vector3(0, groundY, 0),
+      new THREE.Vector3(0, groundY + lineHeight, 0)
+    ]);
+
+    const line = new THREE.Line(
+      lineGeometry,
+      new THREE.LineBasicMaterial({ color })
+    );
+    group.add(line);
+
+    const dot = new THREE.Mesh(
+      new THREE.SphereGeometry(0.7, 12, 12),
+      new THREE.MeshBasicMaterial({ color })
+    );
+    dot.position.set(0, groundY, 0);
+    group.add(dot);
+
+    group.position.set(x, 0, z);
+    scene.add(group);
+    addPOIs.markers.push(group);
+
+    const element = document.createElement("div");
+    element.textContent = name;
+
+    if (
+      name === "Baie des Milliardaires" ||
+      name === "La Garoupe Lighthouse" ||
+      name === "Sentier de Tirepoil"
+    ) {
+      element.style.cursor = "pointer";
+      element.title = "Click to view photo";
+      element.textContent = "📷 " + name;
+
+      element.addEventListener("click", (event) => {
+        event.stopPropagation();
+        if (name === "Baie des Milliardaires") openBayPhoto();
+        else if (name === "La Garoupe Lighthouse") openLighthousePhoto();
+        else if (name === "Sentier de Tirepoil") openTirepoilPhoto();
+      });
+    }
+
+    Object.assign(element.style, {
+      color: "#ffffff",
+      background: "rgba(15, 30, 42, 0.92)",
+      border: `1px solid #${color.toString(16).padStart(6, "0")}`,
+      borderRadius: "4px",
+      padding: "5px 8px",
+      font: "bold 13px Arial, sans-serif",
+      whiteSpace: "nowrap",
+      textShadow: "0 1px 2px #000",
+      pointerEvents: "auto"
+    });
+
+    const label = new CSS2DObject(element);
+    label.position.set(x, groundY + lineHeight + 1, z);
+    scene.add(label);
+    addPOIs.labels.push(label);
+  }
+}
+
+// --------------------------------------------------
+// ANIMATED WALKING ROUTE
+// --------------------------------------------------
+
+function densifyLatLonCoordinates(coords, maxSegmentMeters = 0.5) {
+  const dense = [];
+
+  for (let i = 0; i < coords.length - 1; i++) {
+    const [lon1, lat1] = coords[i];
+    const [lon2, lat2] = coords[i + 1];
+
+    const meanLat = ((lat1 + lat2) / 2) * Math.PI / 180;
+    const dx = (lon2 - lon1) * 111320 * Math.cos(meanLat);
+    const dy = (lat2 - lat1) * 111320;
+    const distance = Math.hypot(dx, dy);
+
+    const steps = Math.max(
+      1,
+      Math.ceil(distance / maxSegmentMeters)
+    );
+
+    for (let j = 0; j < steps; j++) {
+      const t = j / steps;
+      dense.push([
+        lon1 + (lon2 - lon1) * t,
+        lat1 + (lat2 - lat1) * t
+      ]);
+    }
+  }
+
+  dense.push(coords[coords.length - 1]);
+  return dense;
+}
+    
+async function loadWalkRoute() {
+  try {
+    const response = await fetch(
+      "https://mapsmania.github.io/3Dmap/bay.geojson"
+    );
+
+    if (!response.ok) {
+      throw new Error(`HTTP ${response.status}`);
+    }
+
+    const geojson = await response.json();
+    let coordinates;
+
+    if (geojson.type === "FeatureCollection") {
+      const feature = geojson.features.find(
+        f => f.geometry?.type === "LineString"
+      );
+      if (feature) coordinates = feature.geometry.coordinates;
+    } else if (geojson.type === "Feature") {
+      if (geojson.geometry?.type === "LineString") coordinates = geojson.geometry.coordinates;
+    } else if (geojson.type === "LineString") {
+      coordinates = geojson.coordinates;
+    }
+
+    if (!coordinates) {
+      throw new Error("No LineString found in the GeoJSON.");
+    }
+
+    walkPoints = densifyLatLonCoordinates(coordinates, 0.5);
+    buildWalkLine();
+
+  } catch (error) {
+    console.error("Could not load walking route:", error);
+  }
+}
+
+function buildWalkLine() {
+  if (!terrainSettings || walkPoints.length < 2) return;
+
+  if (walkLine) {
+    scene.remove(walkLine);
+    walkLine.geometry.dispose();
+    walkLine.material.dispose();
+    walkLine = null;
+  }
+
+  const {
+    raster,
+    width,
+    height,
+    min,
+    noData,
+    worldWidth,
+    worldDepth,
+    mapWidth,
+    bounds,
+    boundsWidth,
+    boundsHeight
+  } = terrainSettings;
+
+  const verticalScale = worldWidth / mapWidth * Number(slider.value);
+  const points = [];
+
+  for (const coordinate of walkPoints) {
+    const [lon, lat] = coordinate;
+
+    const nx = (lon - bounds[0]) / boundsWidth;
+    const ny = (bounds[3] - lat) / boundsHeight;
+
+    if (nx < 0 || nx > 1 || ny < 0 || ny > 1) continue;
+
+    const col = Math.max(0, Math.min(width - 1, Math.round(nx * (width - 1))));
+    const row = Math.max(0, Math.min(height - 1, Math.round(ny * (height - 1))));
+
+    const elevation = Number(raster[row * width + col]);
+    const isNoData = noData !== null && noData !== undefined && elevation === Number(noData);
+
+    if (!Number.isFinite(elevation) || isNoData) continue;
+
+    const x = (nx - 0.5) * worldWidth;
+    const z = (ny - 0.5) * worldDepth;
+    const y = (elevation - min) * verticalScale;
+
+    points.push(new THREE.Vector3(x, y + 0.25, z));
+  }
+
+  if (points.length < 2) {
+    console.warn("Not enough valid route points fall inside the terrain.");
+    return;
+  }
+
+  walkRoute3D = points;  
+  smoothCurve = new THREE.CatmullRomCurve3(points);
+  smoothCurve.closed = false;
+
+  const geometry = new THREE.BufferGeometry().setFromPoints(points);
+  geometry.setDrawRange(0, 0);
+
+  const material = new THREE.LineBasicMaterial({
+    color: 0xffdd44,
+    linewidth: 2
+  });
+
+  walkLine = new THREE.Line(geometry, material);
+  walkLine.frustumCulled = false;
+
+  scene.add(walkLine);
+  walkVisiblePointCount = points.length;
+}
+
+let walkVisiblePointCount = 0;
+
+function animateWalkRoute(now) {
+  if (
+    !walkLine ||
+    walkStartTime === null ||
+    walkRoute3D.length < 2 ||
+    !smoothCurve
+  ) return;
+
+  const progress = Math.min(
+    (now - walkStartTime) / walkDuration,
+    1
+  );
+
+  const lastIndex = walkRoute3D.length - 1;
+  const routePosition = progress * lastIndex;
+  const index = Math.min(Math.floor(routePosition), lastIndex - 1);
+  const fraction = routePosition - index;
+
+  const visibleCount = index + 2;
+  walkLine.geometry.setDrawRange(0, Math.min(visibleCount, walkVisiblePointCount));
+
+  const attr = walkLine.geometry.attributes.position;
+  if (index + 1 < walkRoute3D.length) {
+    const pA = walkRoute3D[index];
+    const pB = walkRoute3D[index + 1];
+    attr.setXYZ(
+      index + 1,
+      pA.x + (pB.x - pA.x) * fraction,
+      pA.y + (pB.y - pA.y) * fraction,
+      pA.z + (pB.z - pA.z) * fraction
+    );
+    attr.needsUpdate = true;
+  }
+
+  const current = smoothCurve.getPoint(progress);
+  const lookAheadProgress = Math.min(progress + 0.03, 1);
+  const ahead = smoothCurve.getPoint(lookAheadProgress);
+
+  const direction = new THREE.Vector3(
+    ahead.x - current.x,
+    0,
+    ahead.z - current.z
+  );
+
+  if (direction.lengthSq() > 0.000001) {
+    direction.normalize();
+  }
+
+  const desiredCamera = new THREE.Vector3(
+    current.x - direction.x * 12,
+    current.y + 9,
+    current.z - direction.z * 12
+  );
+
+  const desiredTarget = new THREE.Vector3(
+    ahead.x,
+    ahead.y + 2,
+    ahead.z
+  );
+
+  camera.position.lerp(desiredCamera, 0.08);
+  controls.target.lerp(desiredTarget, 0.12);
+
+  if (progress >= 1) {
+    walkLine.geometry.setDrawRange(0, walkVisiblePointCount);
+    walkStartTime = null;
+  }
+}
+
+// --------------------------------------------------
+// VERTICAL EXAGGERATION
+// --------------------------------------------------
 
 slider.addEventListener("input", () => {
   exValue.textContent = slider.value + "×";
-  if (terrainSettings) buildTerrain(Number(slider.value));
+
+  if (terrainSettings) {
+    buildTerrain(Number(slider.value));
+
+    if (walkLine) {
+      walkStartTime = null; 
+    }
+  }
 });
+
+// --------------------------------------------------
+// START
+// --------------------------------------------------
 
 loadTerrain();
 
-function animate() {
+function animate(now) {
   requestAnimationFrame(animate);
+
   controls.update();
+  animateWalkRoute(now);
+
   renderer.render(scene, camera);
+  labelRenderer.render(scene, camera);
 }
+
 animate();
+
+// --------------------------------------------------
+// RESIZE
+// --------------------------------------------------
 
 window.addEventListener("resize", () => {
   camera.aspect = innerWidth / innerHeight;
   camera.updateProjectionMatrix();
+
   renderer.setSize(innerWidth, innerHeight);
+  labelRenderer.setSize(innerWidth, innerHeight);
 });
+
 </script>
 </body>
 </html>
