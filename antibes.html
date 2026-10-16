@@ -199,10 +199,11 @@ function buildTerrain(exaggeration) {
   const colours = [];
   const indices = [];
 
-  const low = new THREE.Color(0x397653);
-  const middle = new THREE.Color(0xc4ad78);
-  const high = new THREE.Color(0xf0eee5);
-  const colour = new THREE.Color();
+const low = new THREE.Color(0xd2b48c); // Tan / Sand
+const middle = new THREE.Color(0x397653); // Green further up
+const high = new THREE.Color(0xf0eee5);  
+const colour = new THREE.Color();
+
 
   for (let y = 0; y < height; y++) {
     for (let x = 0; x < width; x++) {
