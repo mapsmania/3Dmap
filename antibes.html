@@ -43,7 +43,6 @@
   <div id="status">Loading elevation data…</div>
 </div>
 
-
 <script type="importmap">
 {
   "imports": {
@@ -55,14 +54,9 @@
 
 <script type="module">
 
-
 import * as THREE from "three";
-
-import { OrbitControls } from
-  "three/addons/controls/OrbitControls.js";
-
-import { fromUrl } from
-  "https://cdn.jsdelivr.net/npm/geotiff@2.1.4-beta.1/+esm";
+import { OrbitControls } from "three/addons/controls/OrbitControls.js";
+import { fromUrl } from "https://cdn.jsdelivr.net/npm/geotiff@2.1.4-beta.1/+esm";
     
 const scene = new THREE.Scene();
 scene.background = new THREE.Color("#168aad");
@@ -101,61 +95,42 @@ async function loadTerrain() {
   try {
     status.textContent = "Loading GeoTIFF…";
 
-    // GeoTIFF must be in the same folder as this HTML file.
     const tiff = await fromUrl("./cap_antibes_mapterhorn.tif");
     const image = await tiff.getImage();
 
     const originalWidth = image.getWidth();
     const originalHeight = image.getHeight();
     const bounds = image.getBoundingBox();
-
-    // Downsample large rasters for browser performance.
-    const factor = Math.min(
-      1, 500 / Math.max(originalWidth, originalHeight)
-    );
     
-      const width = 500;
-const height = Math.round(
-  originalHeight * width / originalWidth
-);
+    const width = 500;
+    const height = Math.round(originalHeight * width / originalWidth);
 
-const raster = await image.readRasters({
-  samples: [0],
-  interleave: true,
-  width,
-  height,
-  resampleMethod: "bilinear"
-});
-
-console.log("Raster dimensions:", width, height);
-console.log("Raster values:", raster.length);
+    const raster = await image.readRasters({
+      samples: [0],
+      interleave: true,
+      width,
+      height,
+      resampleMethod: "bilinear"
+    });
       
-    
-const noData = image.getGDALNoData();
+    const noData = image.getGDALNoData();
 
-let min = Infinity;
-let max = -Infinity;
+    let min = Infinity;
+    let max = -Infinity;
 
-for (let i = 0; i < raster.length; i++) {
-  const v = Number(raster[i]);
+    for (let i = 0; i < raster.length; i++) {
+      const v = Number(raster[i]);
+      const isNoData = noData !== null && noData !== undefined && v === Number(noData);
 
-  const isNoData =
-    noData !== null &&
-    noData !== undefined &&
-    v === Number(noData);
+      if (Number.isFinite(v) && !isNoData) {
+        if (v < min) min = v;
+        if (v > max) max = v;
+      }
+    }
 
-  if (Number.isFinite(v) && !isNoData) {
-    if (v < min) min = v;
-    if (v > max) max = v;
-  }
-}
-
-if (!Number.isFinite(min) || !Number.isFinite(max)) {
-  throw new Error("No valid elevation values.");
-}
-
-console.log("Elevation range:", min, max);
-
+    if (!Number.isFinite(min) || !Number.isFinite(max)) {
+      throw new Error("No valid elevation values.");
+    }
 
     const mapWidth = bounds[2] - bounds[0];
     const mapHeight = bounds[3] - bounds[1];
@@ -198,20 +173,24 @@ function buildTerrain(exaggeration) {
   const colours = [];
   const indices = [];
 
-const low = new THREE.Color(0xd2b48c); // Tan / Sand
-const middle = new THREE.Color(0x397653); // Green further up
-const high = new THREE.Color(0xf0eee5);  
-const colour = new THREE.Color();
+  const low = new THREE.Color(0xd2b48c); // Tan / Sand
+  const middle = new THREE.Color(0x397653); // Green further up
+  const high = new THREE.Color(0xf0eee5);  
+  const colour = new THREE.Color();
 
+  // Helper to filter out nodata and sea level pixels so water shows through
+  const validAt = (index) => {
+    const v = Number(raster[index]);
+    const isNoData = noData !== null && noData !== undefined && v === Number(noData);
+    return Number.isFinite(v) && !isNoData && v > 0.5;
+  };
 
   for (let y = 0; y < height; y++) {
     for (let x = 0; x < width; x++) {
       const i = y * width + x;
       const elevation = Number(raster[i]);
-
       const isValid = Number.isFinite(elevation) &&
-        !(noData !== null && noData !== undefined &&
-          elevation === Number(noData));
+        !(noData !== null && noData !== undefined && elevation === Number(noData));
 
       const zHeight = isValid ? elevation : min;
 
@@ -229,49 +208,28 @@ const colour = new THREE.Color();
         colour.copy(middle).lerp(high, (t - 0.55) / 0.45);
       }
 
-
       colours.push(colour.r, colour.g, colour.b);
 
       if (x < width - 1 && y < height - 1) {
-  const a = i;
-  const b = i + 1;
-  const c = i + width;
-  const d = i + width + 1;
+        const a = i;
+        const b = i + 1;
+        const c = i + width;
+        const d = i + width + 1;
 
-  // Inside buildTerrain, update your validAt helper:
-  if (x < width - 1 && y < height - 1) {
-    const a = i;
-    const b = i + 1;
-    const c = i + width;
-    const d = i + width + 1;
+        if (validAt(a) && validAt(b) && validAt(c)) {
+          indices.push(a, c, b);
+        }
 
-    const validAt = (index) => {
-      const v = Number(raster[index]);
-      const isNoData = noData !== null && noData !== undefined && v === Number(noData);
-      
-      // FIX: Also treat any elevation at or below sea level (<= 0.5m) as water/invalid for land
-      return Number.isFinite(v) && !isNoData && v > 0.5;
-    };
-
-    if (validAt(a) && validAt(b) && validAt(c)) {
-      indices.push(a, c, b);
-    }
-
-    if (validAt(b) && validAt(c) && validAt(d)) {
-      indices.push(b, c, d);
+        if (validAt(b) && validAt(c) && validAt(d)) {
+          indices.push(b, c, d);
+        }
+      }
     }
   }
 
-  
-  
-
   const geometry = new THREE.BufferGeometry();
-  geometry.setAttribute(
-    "position", new THREE.Float32BufferAttribute(positions, 3)
-  );
-  geometry.setAttribute(
-    "color", new THREE.Float32BufferAttribute(colours, 3)
-  );
+  geometry.setAttribute("position", new THREE.Float32BufferAttribute(positions, 3));
+  geometry.setAttribute("color", new THREE.Float32BufferAttribute(colours, 3));
   geometry.setIndex(indices);
   geometry.computeVertexNormals();
 
@@ -283,18 +241,17 @@ const colour = new THREE.Color();
 
   terrainGeometry = geometry;
   terrainMaterial = new THREE.MeshStandardMaterial({
-  vertexColors: true,
-  roughness: 1,
-  metalness: 0,
-  side: THREE.DoubleSide,
-  transparent: true,
-  opacity: 1
-});
+    vertexColors: true,
+    roughness: 1,
+    metalness: 0,
+    side: THREE.DoubleSide,
+    transparent: true,
+    opacity: 1
+  });
 
   terrain = new THREE.Mesh(geometry, terrainMaterial);
   scene.add(terrain);
 
-  
   // Mediterranean Sea plane at zero metres elevation
   const seaLevelY = (0 - min) * verticalScale;
 
@@ -312,17 +269,12 @@ const colour = new THREE.Color();
     });
 
     seaPlane = new THREE.Mesh(seaGeometry, seaMaterial);
-
-    // Rotate the plane so it lies horizontally in the XZ plane.
     seaPlane.rotation.x = -Math.PI / 2;
-
     scene.add(seaPlane);
   }
 
-  // Increase the offset so the water sits safely above coastal artifacts
-seaPlane.position.set(0, seaLevelY + 0.25 * verticalScale, 0);
+  seaPlane.position.set(0, seaLevelY + 0.25 * verticalScale, 0);
 
-  
   // Automatically frame the terrain in the camera
   const box = new THREE.Box3().setFromObject(terrain);
   const size = box.getSize(new THREE.Vector3());
@@ -331,21 +283,18 @@ seaPlane.position.set(0, seaLevelY + 0.25 * verticalScale, 0);
   controls.target.copy(center);
 
   const maxDimension = Math.max(size.x, size.y, size.z);
+  const distance = maxDimension * 0.8;
 
-// Bring the camera closer to make the terrain appear larger.
-const distance = maxDimension * 0.8;
-
-camera.position.set(
-  center.x + distance,
-  center.y + distance * 0.8,
-  center.z + distance
-);
+  camera.position.set(
+    center.x + distance,
+    center.y + distance * 0.8,
+    center.z + distance
+  );
 
   camera.near = 0.1;
   camera.far = distance * 10;
   camera.updateProjectionMatrix();
   controls.update();
-
 }
 
 slider.addEventListener("input", () => {
