@@ -92,6 +92,9 @@ renderer.setSize(innerWidth, innerHeight);
 renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
 renderer.outputColorSpace = THREE.SRGBColorSpace;
 
+// Enable real terrain shadows
+renderer.shadowMap.enabled = true;
+renderer.shadowMap.type = THREE.PCFSoftShadowMap;
 document.body.appendChild(renderer.domElement);
 
 // CSS2D renderer for POI labels
@@ -116,15 +119,42 @@ const controls = new OrbitControls(
 
 controls.enableDamping = true;
 
-// Lighting
-scene.add(
-  new THREE.HemisphereLight(0xffffff, 0x52616b, 2)
+// --------------------------------------------------
+// SUNLIGHT AND SHADOWS
+// --------------------------------------------------
+
+// Softer ambient light so shaded terrain remains visible
+const ambientLight = new THREE.HemisphereLight(
+  0xffffff,
+  0x52616b,
+  0.8
 );
+scene.add(ambientLight);
 
-const sun = new THREE.DirectionalLight(0xffffff, 2.5);
+// Directional sunlight
+const sun = new THREE.DirectionalLight(0xffffff, 3);
+
 sun.position.set(-40, 100, 60);
-scene.add(sun);
+sun.target.position.set(0, 0, 0);
 
+sun.castShadow = true;
+
+sun.shadow.mapSize.set(2048, 2048);
+
+sun.shadow.camera.left = -80;
+sun.shadow.camera.right = 80;
+sun.shadow.camera.top = 80;
+sun.shadow.camera.bottom = -80;
+
+sun.shadow.camera.near = 1;
+sun.shadow.camera.far = 300;
+
+sun.shadow.bias = -0.0002;
+sun.shadow.normalBias = 0.03;
+
+scene.add(sun);
+scene.add(sun.target);
+    
 // --------------------------------------------------
 // VARIABLES
 // --------------------------------------------------
@@ -143,6 +173,8 @@ let walkPoints = [];
 let walkStartTime = null;
 let walkRoute3D = [];      
 let smoothCurve = null;
+let roadData = null;
+let roadLines = null;    
 
 const walkDuration = 20000; // 20 seconds to draw the route      
 
@@ -284,7 +316,8 @@ async function loadTerrain() {
     };
 
     buildTerrain(Number(slider.value));
-    loadWalkRoute();  
+    loadWalkRoute(); 
+    loadRoads();
 
   } catch (error) {
     console.error(error);
@@ -411,12 +444,15 @@ function buildTerrain(exaggeration) {
   });
 
   terrain = new THREE.Mesh(
-    geometry,
-    terrainMaterial
-  );
+  geometry,
+  terrainMaterial
+);
 
-  scene.add(terrain);
+terrain.castShadow = true;
+terrain.receiveShadow = true;
 
+scene.add(terrain);
+    
   const seaLevelY =
     (seaLevelMeters - min) * verticalScale;
 
@@ -444,6 +480,8 @@ function buildTerrain(exaggeration) {
 
   seaPlane.position.y = seaLevelY;
   seaPlane.visible = true;
+  seaPlane.receiveShadow = true;
+
 
   const box = new THREE.Box3().setFromObject(terrain);
   const size = box.getSize(new THREE.Vector3());
@@ -496,10 +534,146 @@ function buildTerrain(exaggeration) {
   controls.update();
 
   addPOIs();
+  addRoads();
+    
   if (walkPoints.length > 0) {
     buildWalkLine();
   }  
 }
+
+
+async function loadRoads() {
+  try {
+    const response = await fetch(
+      "https://mapsmania.github.io/3Dmap/road.geojson"
+    );
+
+    if (!response.ok) {
+      throw new Error(`Road data request failed: ${response.status}`);
+    }
+
+    roadData = await response.json();
+    addRoads();
+
+    console.log("Roads loaded:", roadData.features.length);
+  } catch (error) {
+    console.error("Could not load roads:", error);
+  }
+}
+
+function addRoads() {
+  if (!roadData || !terrainSettings) return;
+
+  if (roadLines) {
+    scene.remove(roadLines);
+    roadLines.geometry.dispose();
+    roadLines.material.dispose();
+  }
+
+  const {
+    raster,
+    width,
+    height,
+    min,
+    noData,
+    worldWidth,
+    worldDepth,
+    mapWidth,
+    bounds,
+    boundsWidth,
+    boundsHeight
+  } = terrainSettings;
+
+  const verticalScale =
+    worldWidth / mapWidth * Number(slider.value);
+
+  const positions = [];
+  const offset = 0.025;
+
+  function getRoadPoint(coord) {
+    const lon = coord[0];
+    const lat = coord[1];
+
+    const nx = (lon - bounds[0]) / boundsWidth;
+    const ny = (bounds[3] - lat) / boundsHeight;
+
+    if (nx < 0 || nx > 1 || ny < 0 || ny > 1) {
+      return null;
+    }
+
+    const col = Math.max(
+      0,
+      Math.min(width - 1, Math.round(nx * (width - 1)))
+    );
+
+    const row = Math.max(
+      0,
+      Math.min(height - 1, Math.round(ny * (height - 1)))
+    );
+
+    const elevation = Number(raster[row * width + col]);
+
+    if (
+      !Number.isFinite(elevation) ||
+      (noData !== null &&
+       noData !== undefined &&
+       elevation === Number(noData))
+    ) {
+      return null;
+    }
+
+    return new THREE.Vector3(
+      (nx - 0.5) * worldWidth,
+      (elevation - min) * verticalScale + offset,
+      (ny - 0.5) * worldDepth
+    );
+  }
+
+  for (const feature of roadData.features) {
+    const geometry = feature.geometry;
+    if (!geometry) continue;
+
+    let lines = [];
+
+    if (geometry.type === "LineString") {
+      lines = [geometry.coordinates];
+    } else if (geometry.type === "MultiLineString") {
+      lines = geometry.coordinates;
+    }
+
+    for (const coords of lines) {
+      for (let i = 1; i < coords.length; i++) {
+        const a = getRoadPoint(coords[i - 1]);
+        const b = getRoadPoint(coords[i]);
+
+        if (a && b) {
+          positions.push(
+            a.x, a.y, a.z,
+            b.x, b.y, b.z
+          );
+        }
+      }
+    }
+  }
+
+  const geometry = new THREE.BufferGeometry();
+  geometry.setAttribute(
+    "position",
+    new THREE.Float32BufferAttribute(positions, 3)
+  );
+
+  roadLines = new THREE.LineSegments(
+    geometry,
+    new THREE.LineBasicMaterial({
+      color: 0x000000,
+      transparent: true,
+      opacity: 0.9
+    })
+  );
+
+  scene.add(roadLines);
+}
+    
 
 // --------------------------------------------------
 // PHOTO POPUPS
